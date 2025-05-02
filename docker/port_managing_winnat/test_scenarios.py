@@ -27,7 +27,12 @@ async def run_conflict_test():
     logging.info(f"Testing with port: {test_port}")
     
     try:
-        # 포트를 WinNAT에 등록
+        # 1. 혹시 사용 중인 프로세스가 있다면 종료
+        logging.info(f"Checking for processes using port {test_port}...")
+        analyzer.kill_process_using_port(test_port)
+        await asyncio.sleep(2)  # 잠시 대기
+        
+        # 2. 포트를 WinNAT에 등록
         logging.info(f"Adding port {test_port} to WinNAT")
         if not analyzer.add_port_to_winnat(test_port):
             logging.error("Failed to add port to WinNAT")
@@ -36,75 +41,63 @@ async def run_conflict_test():
         logging.info("Port added to WinNAT successfully")
         await asyncio.sleep(2)  # 잠시 대기
         
-        # 첫 번째 시도: 충돌 발생시키기
-        logging.info("=== First attempt: Creating port conflict ===")
-        
-        # 소켓 생성으로 포트 선점
-        conflict_socket = await create_conflicting_socket(test_port)
-        if not conflict_socket:
-            logging.error("Failed to create conflicting socket")
-            return None
-        
-        logging.info(f"Created conflicting socket on port {test_port}")
-        await asyncio.sleep(2)
-        
-        # WinNAT에서 해당 포트 제외
-        logging.info(f"Excluding port {test_port} from WinNAT")
-        if not analyzer.exclude_port_from_winnat(test_port):
-            logging.error("Failed to exclude port from WinNAT")
-            return None
-            
-        # 소켓 정리
-        conflict_socket.close()
-        logging.info("Closed conflicting socket")
-        await asyncio.sleep(2)
-        
-        # 두 번째 시도: 컨테이너 실행
-        logging.info("=== Second attempt: Running container ===")
-        
-        # 이미지 확인 및 pull
-        try:
-            logging.info("Checking nginx image...")
-            docker_client.images.get('nginx')
-        except docker.errors.ImageNotFound:
-            logging.info("Pulling nginx image...")
-            docker_client.images.pull('nginx')
-        
-        # 동일 이름의 기존 컨테이너 정리
-        try:
-            old_container = docker_client.containers.get(f"port_test_{test_port}")
-            logging.info(f"Found existing container: port_test_{test_port}")
-            old_container.stop()
-            old_container.remove()
-            logging.info("Removed existing container")
-        except docker.errors.NotFound:
-            logging.info("No existing container found")
-        
-        # Docker 컨테이너 생성 및 실행
-        logging.info(f"Creating new container: port_test_{test_port}")
+        # 3. Docker 컨테이너로 충돌 발생시키기
+        logging.info(f"Creating container with port {test_port} to create conflict")
         container = docker_client.containers.create(
             'nginx',
             name=f"port_test_{test_port}",
-            ports={f'{test_port}/tcp': test_port},
+            ports={'80/tcp': test_port},
             detach=True
         )
         
         logging.info("Starting container...")
         container.start()
+        container.reload()
         
         # 컨테이너 상태 확인
-        container.reload()
         state = container.attrs['State']
-        
         if state['Status'] != 'running':
-            error_msg = state.get('Error', '')
-            exit_code = state.get('ExitCode', -1)
-            logging.error(f"Container failed to start. Status: {state['Status']}, Error: {error_msg}, Exit code: {exit_code}")
-            logs = container.logs(tail=50).decode('utf-8')
-            logging.error(f"Container logs:\n{logs}")
-            raise Exception(f"Container failed to start: {error_msg}")
+            logging.info("Container failed to start - port is properly reserved by WinNAT")
+            logs = container.logs().decode('utf-8')
+            logging.info(f"Container logs:\n{logs}")
+        else:
+            logging.warning("Container unexpectedly started on reserved port")
             
-        logging.info(f"Container started successfully: {container.id}")
+        await asyncio.sleep(2)  # 잠시 대기
+        
+        # 4. 컨테이너 정리
+        if container:
+            container.stop()
+            container.remove()
+            logging.info("Container cleaned up")
+            
+        # 5. WinNAT에서 포트 제외하고 다시 시도
+        logging.info(f"Excluding port {test_port} from WinNAT")
+        if not analyzer.exclude_port_from_winnat(test_port):
+            logging.error("Failed to exclude port from WinNAT")
+            return None
+            
+        logging.info("Port excluded from WinNAT successfully")
+        await asyncio.sleep(2)  # 잠시 대기
+        
+        # 6. 이제 컨테이너가 시작될 수 있어야 함
+        logging.info("Testing container creation after port exclusion")
+        container = docker_client.containers.create(
+            'nginx',
+            name=f"port_test_{test_port}",
+            ports={'80/tcp': test_port},
+            detach=True
+        )
+        
+        logging.info("Starting container...")
+        container.start()
+        container.reload()
+        
+        state = container.attrs['State']
+        if state['Status'] == 'running':
+            logging.info("Successfully started container after port exclusion")
+        else:
+            logging.error("Failed to start container even after port exclusion")
         
         # 도커 로그 수집
         container_logs = []
