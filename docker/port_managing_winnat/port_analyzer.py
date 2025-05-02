@@ -95,8 +95,28 @@ class WinNATAnalyzer:
                 self.logger.info(f"Successfully excluded port {port} from WinNAT")
                 return True
             else:
-                self.logger.error(f"Failed to exclude port {port}: {result.stderr}")
+                self.logger.error(f"Failed to exclude port {port}: {result}")
                 return False
         except Exception as e:
             self.logger.error(f"Error excluding port from WinNAT: {e}")
+            return False
+
+    def add_port_to_winnat(self, port: int) -> bool:
+        """포트를 WinNAT에 등록"""
+        try:
+            result = subprocess.run(
+                [self.netsh_path, "interface", "ipv4", "add", "excludedportrange", 
+                 "protocol=tcp", f"startport={port}", "numberofports=1"],
+                capture_output=True,
+                text=True,
+                shell=True
+            )
+            if result.returncode == 0:
+                self.logger.info(f"Successfully added port {port} to WinNAT")
+                return True
+            else:
+                self.logger.error(f"Failed to add port to WinNAT: {result}")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error adding port to WinNAT: {e}")
             return False
