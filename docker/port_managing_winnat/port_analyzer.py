@@ -3,6 +3,7 @@ import logging
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
 from datetime import datetime
+import time
 
 @dataclass
 class ExcludedPortRange:
@@ -81,21 +82,67 @@ class WinNATAnalyzer:
                 return False
         return True
 
+    def kill_process_using_port(self, port: int) -> bool:
+        """특정 포트를 사용하는 프로세스 종료"""
+        try:
+            # netstat으로 포트 사용 중인 프로세스 찾기
+            result = subprocess.run(
+                f"netstat -ano | findstr :{port}",
+                capture_output=True,
+                text=True,
+                shell=True
+            )
+            
+            if result.stdout:
+                # PID 추출 (마지막 열)
+                for line in result.stdout.split('\n'):
+                    if line.strip():
+                        pid = line.strip().split()[-1]
+                        self.logger.info(f"Found process {pid} using port {port}")
+                        
+                        # 프로세스 종료
+                        kill_result = subprocess.run(
+                            f"taskkill /PID {pid} /F",
+                            capture_output=True,
+                            text=True,
+                            shell=True
+                        )
+                        
+                        if kill_result.returncode == 0:
+                            self.logger.info(f"Successfully terminated process {pid}")
+                            return True
+                        else:
+                            self.logger.error(f"Failed to terminate process: {kill_result}")
+            
+            return False
+        except Exception as e:
+            self.logger.error(f"Error killing process: {e}")
+            return False
+
     def exclude_port_from_winnat(self, port: int) -> bool:
         """특정 포트를 WinNAT에서 제외"""
         try:
+            # 먼저 포트 사용 중인 프로세스 종료
+            if self.kill_process_using_port(port):
+                self.logger.info(f"Terminated process using port {port}")
+            
+            # 잠시 대기
+            time.sleep(2)
+            
+            # 이제 포트 제외
             result = subprocess.run(
-                [self.netsh_path, "interface", "ipv4", "add", "excludedportrange", 
+                [self.netsh_path, "interface", "ipv4", "delete", "excludedportrange", 
                  "protocol=tcp", f"startport={port}", "numberofports=1"],
                 capture_output=True,
                 text=True,
                 shell=True
             )
+            
             if result.returncode == 0:
                 self.logger.info(f"Successfully excluded port {port} from WinNAT")
                 return True
             else:
-                self.logger.error(f"Failed to exclude port {port}: {result}")
+                self.logger.error(f"Failed to exclude port from WinNAT: {result}")
                 return False
         except Exception as e:
             self.logger.error(f"Error excluding port from WinNAT: {e}")
