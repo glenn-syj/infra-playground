@@ -42,6 +42,32 @@ async def run_conflict_test():
     logging.info(f"Testing with excluded port: {test_port}")
     
     try:
+        # 첫 번째 시도: 충돌 발생시키기
+        logging.info("=== First attempt: Creating port conflict ===")
+        
+        # 소켓 생성으로 포트 선점
+        conflict_socket = await create_conflicting_socket(test_port)
+        if not conflict_socket:
+            logging.error("Failed to create conflicting socket")
+            return None
+        
+        logging.info(f"Created conflicting socket on port {test_port}")
+        await asyncio.sleep(2)
+        
+        # WinNAT에서 해당 포트 제외
+        logging.info(f"Excluding port {test_port} from WinNAT")
+        if not analyzer.exclude_port_from_winnat(test_port):
+            logging.error("Failed to exclude port from WinNAT")
+            return None
+            
+        # 소켓 정리
+        conflict_socket.close()
+        logging.info("Closed conflicting socket")
+        await asyncio.sleep(2)
+        
+        # 두 번째 시도: 컨테이너 실행
+        logging.info("=== Second attempt: Running container ===")
+        
         # 이미지 확인 및 pull
         try:
             logging.info("Checking nginx image...")
@@ -60,15 +86,15 @@ async def run_conflict_test():
         except docker.errors.NotFound:
             logging.info("No existing container found")
         
-        # 1. Docker 컨테이너 생성
+        # Docker 컨테이너 생성 및 실행
         logging.info(f"Creating new container: {container_name}")
         container = docker_client.containers.create(
             'nginx',
             name=container_name,
-            ports={f'{test_port}/tcp': test_port}
+            ports={f'{test_port}/tcp': test_port},
+            detach=True
         )
         
-        # 2. 컨테이너 시작
         logging.info("Starting container...")
         container.start()
         
@@ -80,11 +106,8 @@ async def run_conflict_test():
             error_msg = state.get('Error', '')
             exit_code = state.get('ExitCode', -1)
             logging.error(f"Container failed to start. Status: {state['Status']}, Error: {error_msg}, Exit code: {exit_code}")
-            
-            # 상세 로그 확인
             logs = container.logs(tail=50).decode('utf-8')
             logging.error(f"Container logs:\n{logs}")
-            
             raise Exception(f"Container failed to start: {error_msg}")
             
         logging.info(f"Container started successfully: {container.id}")
@@ -98,23 +121,11 @@ async def run_conflict_test():
         except Exception as e:
             logging.error(f"Failed to collect logs: {e}")
         
-        # 2. 충돌 시나리오 실행
-        logging.info(f"Creating conflicting socket on port {test_port}")
-        conflict_socket = await create_conflicting_socket(test_port)
-        
-        # 잠시 대기하여 충돌 상태 관찰
-        await asyncio.sleep(5)
-        
-        # 3. 테스트 후 예약 포트 범위 재확인
+        # 최종 상태 확인
         final_ranges = analyzer.get_excluded_port_ranges()
-        
-        # 컨테이너 상태 확인
         container.reload()
         container_state = container.attrs['State']
         
-        if conflict_socket:
-            conflict_socket.close()
-            
         return {
             'test_port': test_port,
             'initial_ranges': excluded_ranges,
