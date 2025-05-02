@@ -79,3 +79,23 @@ class WinNATAnalyzer:
             if range.start_port <= port <= range.end_port:
                 return False
         return True
+
+    def exclude_port_from_winnat(self, port: int) -> bool:
+        """특정 포트를 WinNAT에서 제외"""
+        try:
+            result = subprocess.run(
+                [self.netsh_path, "interface", "ipv4", "add", "excludedportrange", 
+                 "protocol=tcp", f"startport={port}", "numberofports=1"],
+                capture_output=True,
+                text=True,
+                shell=True
+            )
+            if result.returncode == 0:
+                self.logger.info(f"Successfully excluded port {port} from WinNAT")
+                return True
+            else:
+                self.logger.error(f"Failed to exclude port {port}: {result.stderr}")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error excluding port from WinNAT: {e}")
+            return False
