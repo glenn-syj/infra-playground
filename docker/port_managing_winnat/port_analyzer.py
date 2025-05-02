@@ -151,6 +151,12 @@ class WinNATAnalyzer:
     def add_port_to_winnat(self, port: int) -> bool:
         """포트를 WinNAT에 등록"""
         try:
+            # 먼저 WinNAT 서비스 중지
+            self.logger.info("Stopping WinNAT service...")
+            subprocess.run(["net", "stop", "winnat"], capture_output=True, text=True)
+            time.sleep(2)
+            
+            # 포트 추가
             result = subprocess.run(
                 [self.netsh_path, "interface", "ipv4", "add", "excludedportrange", 
                  "protocol=tcp", f"startport={port}", "numberofports=1"],
@@ -158,12 +164,38 @@ class WinNATAnalyzer:
                 text=True,
                 shell=True
             )
+            
+            # WinNAT 서비스 다시 시작
+            self.logger.info("Starting WinNAT service...")
+            subprocess.run(["net", "start", "winnat"], capture_output=True, text=True)
+            time.sleep(2)
+            
             if result.returncode == 0:
                 self.logger.info(f"Successfully added port {port} to WinNAT")
                 return True
             else:
                 self.logger.error(f"Failed to add port to WinNAT: {result}")
                 return False
+            
         except Exception as e:
             self.logger.error(f"Error adding port to WinNAT: {e}")
+            # 에러 발생시 WinNAT 서비스 재시작 보장
+            try:
+                subprocess.run(["net", "start", "winnat"], capture_output=True, text=True)
+            except:
+                pass
+            return False
+
+    def restart_winnat(self) -> bool:
+        """WinNAT 서비스 재시작"""
+        try:
+            # WinNAT 서비스 재시작
+            subprocess.run(["net", "stop", "winnat"], capture_output=True, text=True)
+            time.sleep(2)
+            subprocess.run(["net", "start", "winnat"], capture_output=True, text=True)
+            time.sleep(2)
+            self.logger.info("WinNAT service restarted successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to restart WinNAT service: {e}")
             return False
