@@ -41,8 +41,8 @@ class WinNATAnalyzer:
         for line in lines:
             line = line.strip()
             
-            # 파싱 시작 지점 찾기
-            if "시작 포트    끝 포트" in line:
+            # 파싱 시작 지점 찾기 (한글/영어 모두 대응)
+            if "Start Port" in line or "시작 포트" in line:
                 start_parsing = True
                 continue
             
@@ -52,14 +52,15 @@ class WinNATAnalyzer:
                     continue
                 
                 # 빈 줄이나 설명줄 건너뛰기
-                if not line or "관리 포트" in line:
+                if not line or "Administered port" in line or "관리 포트" in line:
                     continue
                 
                 try:
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        start_port = int(parts[0])
-                        end_port = int(parts[1])
+                    # 숫자만 추출
+                    numbers = [int(s) for s in line.split() if s.isdigit()]
+                    if len(numbers) >= 2:
+                        start_port = numbers[0]
+                        end_port = numbers[1]
                         is_admin = '*' in line
                         ranges.append(ExcludedPortRange(
                             start_port=start_port,
