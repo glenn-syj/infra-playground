@@ -22,125 +22,67 @@ async def run_conflict_test():
     docker_client = docker.from_env()
     container = None
     
-    # 테스트용 포트 설정 (8080)
-    test_port = 8080
-    logging.info(f"Testing with port: {test_port}")
+    # 1. 현재 WinNAT 상태 확인하여 테스트할 포트 선택
+    logging.info("\n=== Checking WinNAT State ===")
+    current_ranges = analyzer.get_excluded_port_ranges()
+    test_port = None
+    
+    for range in current_ranges:
+        if not range.is_admin:  # 관리자 포트가 아닌 것 중에서 선택
+            test_port = range.start_port
+            logging.info(f"Selected existing WinNAT port {test_port} for testing")
+            break
+    
+    if not test_port:
+        logging.error("No suitable port found in WinNAT")
+        return None
     
     try:
-        # 1. 혹시 사용 중인 프로세스가 있다면 종료
-        logging.info(f"Checking for processes using port {test_port}...")
-        analyzer.kill_process_using_port(test_port)
-        await asyncio.sleep(2)  # 잠시 대기
+        # 2. Docker 컨테이너로 충돌 발생시키기
+        logging.info("\n=== Testing Docker Container Creation ===")
+        logging.info(f"Creating container with port mapping: host {test_port} -> container 80")
         
-        # 2. 포트를 WinNAT에 등록
-        logging.info(f"Adding port {test_port} to WinNAT")
-        if not analyzer.add_port_to_winnat(test_port):
-            logging.error("Failed to add port to WinNAT")
-            return None
-            
-        logging.info("Port added to WinNAT successfully")
-        await asyncio.sleep(2)  # 잠시 대기
-        
-        # 3. Docker 컨테이너로 충돌 발생시키기
-        logging.info(f"Creating container with port {test_port} to create conflict")
-        container = docker_client.containers.create(
-            'nginx',
-            name=f"port_test_{test_port}",
-            ports={'80/tcp': test_port},
-            detach=True
-        )
-        
-        logging.info("Starting container...")
-        container.start()
-        container.reload()
-        
-        # 컨테이너 상태 확인
-        state = container.attrs['State']
-        if state['Status'] != 'running':
-            logging.info("Container failed to start - port is properly reserved by WinNAT")
-            logs = container.logs().decode('utf-8')
-            logging.info(f"Container logs:\n{logs}")
-        else:
-            logging.warning("Container unexpectedly started on reserved port")
-            
-        await asyncio.sleep(2)  # 잠시 대기
-        
-        # 4. 컨테이너 정리
-        if container:
-            container.stop()
-            container.remove()
-            logging.info("Container cleaned up")
-            
-        # 5. WinNAT에서 포트 제외하고 다시 시도
-        logging.info(f"Excluding port {test_port} from WinNAT")
-        if not analyzer.exclude_port_from_winnat(test_port):
-            logging.error("Failed to exclude port from WinNAT")
-            return None
-            
-        logging.info("Port excluded from WinNAT successfully")
-        await asyncio.sleep(2)  # 잠시 대기
-        
-        # 6. 이제 컨테이너가 시작될 수 있어야 함
-        logging.info("Testing container creation after port exclusion")
-        container = docker_client.containers.create(
-            'nginx',
-            name=f"port_test_{test_port}",
-            ports={'80/tcp': test_port},
-            detach=True
-        )
-        
-        logging.info("Starting container...")
-        container.start()
-        container.reload()
-        
-        state = container.attrs['State']
-        if state['Status'] == 'running':
-            logging.info("Successfully started container after port exclusion")
-        else:
-            logging.error("Failed to start container even after port exclusion")
-        
-        # 도커 로그 수집
-        container_logs = []
         try:
-            logs = container.logs(tail=10).decode('utf-8').split('\n')
-            container_logs.extend(log.strip() for log in logs if log.strip())
-            logging.info(f"Collected {len(container_logs)} log lines")
-        except Exception as e:
-            logging.error(f"Failed to collect logs: {e}")
-        
-        # 최종 상태 확인
-        final_ranges = analyzer.get_excluded_port_ranges()
-        container.reload()
-        container_state = container.attrs['State']
-        
-        return {
-            'test_port': test_port,
-            'initial_ranges': analyzer.get_excluded_port_ranges(),
-            'final_ranges': final_ranges,
-            'container_logs': container_logs,
-            'container_state': {
-                'status': container_state['Status'],
-                'running': container_state['Running'],
-                'error': container_state.get('Error', ''),
-                'exit_code': container_state.get('ExitCode', 0)
-            }
-        }
-        
-    except Exception as e:
-        logging.error(f"Test failed: {str(e)}", exc_info=True)
-        return None
-    finally:
-        # cleanup
-        if container:
+            container = docker_client.containers.create(
+                'nginx',
+                name=f"port_test_{test_port}",
+                ports={
+                    '80/tcp': {
+                        'HostIp': '0.0.0.0',
+                        'HostPort': str(test_port)
+                    }
+                },
+                detach=True
+            )
+            
+            logging.info("\nStarting container...")
             try:
-                logging.info(f"Cleaning up container: port_test_{test_port}")
-                container.stop()
-                container.remove()
-                logging.info("Container cleanup completed")
+                container.start()
+                logging.error(f"Container started unexpectedly - port {test_port} should be reserved by WinNAT!")
+                
+                # 포트 바인딩 상태 확인
+                container.reload()
+                port_bindings = container.attrs['NetworkSettings']['Ports']
+                logging.info(f"\nActual port bindings: {port_bindings}")
+                
             except docker.errors.APIError as e:
-                logging.error(f"Cleanup failed: {e}")
-                if hasattr(e, 'response'):
-                    logging.error(f"API Response: {e.response.content.decode()}")
+                logging.info("Container failed to start as expected (port conflict)")
+                logging.info(f"Error: {str(e)}")
+            
+        except Exception as e:
+            logging.error(f"Error during container operation: {e}")
+            
+        finally:
+            # 컨테이너 정리
+            if container:
+                try:
+                    container.remove(force=True)
+                    logging.info("Container cleaned up")
+                except:
+                    pass
+                    
+    except Exception as e:
+        logging.error(f"Test failed: {e}")
 
 async def main():
     """테스트 실행 및 결과 출력"""
