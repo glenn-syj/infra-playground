@@ -4,6 +4,7 @@ import asyncio
 import logging
 import socket
 from datetime import datetime
+import subprocess
 
 async def create_conflicting_socket(port: int):
     """포트 충돌을 일으키기 위한 소켓 생성"""
@@ -21,27 +22,20 @@ async def run_conflict_test():
     docker_client = docker.from_env()
     container = None
     
-    # Windows 예약 포트 범위 확인
-    excluded_ranges = analyzer.get_excluded_port_ranges()
-    if not excluded_ranges:
-        logging.error("Failed to get excluded port ranges")
-        return None
-    
-    # 예약된 포트 중 하나 선택 (관리 포트 제외)
-    test_port = None
-    for range in excluded_ranges:
-        if not range.is_admin:
-            test_port = range.start_port
-            break
-    
-    if not test_port:
-        logging.error("No suitable test port found")
-        return None
-    
-    container_name = f"port_test_{test_port}"
-    logging.info(f"Testing with excluded port: {test_port}")
+    # 테스트용 포트 설정 (8080)
+    test_port = 8080
+    logging.info(f"Testing with port: {test_port}")
     
     try:
+        # 포트를 WinNAT에 등록
+        logging.info(f"Adding port {test_port} to WinNAT")
+        if not analyzer.add_port_to_winnat(test_port):
+            logging.error("Failed to add port to WinNAT")
+            return None
+            
+        logging.info("Port added to WinNAT successfully")
+        await asyncio.sleep(2)  # 잠시 대기
+        
         # 첫 번째 시도: 충돌 발생시키기
         logging.info("=== First attempt: Creating port conflict ===")
         
@@ -78,8 +72,8 @@ async def run_conflict_test():
         
         # 동일 이름의 기존 컨테이너 정리
         try:
-            old_container = docker_client.containers.get(container_name)
-            logging.info(f"Found existing container: {container_name}")
+            old_container = docker_client.containers.get(f"port_test_{test_port}")
+            logging.info(f"Found existing container: port_test_{test_port}")
             old_container.stop()
             old_container.remove()
             logging.info("Removed existing container")
@@ -87,10 +81,10 @@ async def run_conflict_test():
             logging.info("No existing container found")
         
         # Docker 컨테이너 생성 및 실행
-        logging.info(f"Creating new container: {container_name}")
+        logging.info(f"Creating new container: port_test_{test_port}")
         container = docker_client.containers.create(
             'nginx',
-            name=container_name,
+            name=f"port_test_{test_port}",
             ports={f'{test_port}/tcp': test_port},
             detach=True
         )
@@ -128,7 +122,7 @@ async def run_conflict_test():
         
         return {
             'test_port': test_port,
-            'initial_ranges': excluded_ranges,
+            'initial_ranges': analyzer.get_excluded_port_ranges(),
             'final_ranges': final_ranges,
             'container_logs': container_logs,
             'container_state': {
@@ -146,7 +140,7 @@ async def run_conflict_test():
         # cleanup
         if container:
             try:
-                logging.info(f"Cleaning up container: {container_name}")
+                logging.info(f"Cleaning up container: port_test_{test_port}")
                 container.stop()
                 container.remove()
                 logging.info("Container cleanup completed")
